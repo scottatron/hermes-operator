@@ -29,6 +29,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -89,6 +90,7 @@ const (
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=openclaw.rocks,resources=openclawinstances,verbs=get;list;watch
 // +kubebuilder:rbac:groups=hermes.agent,resources=hermesselfconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 
 func (r *HermesInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -341,13 +343,65 @@ func (r *HermesInstanceReconciler) reconcileNetworkPolicy(ctx context.Context, i
 	if !enabled {
 		return r.deleteIfExists(ctx, obj)
 	}
+	var apiServer []resources.APIServerEndpoint
+	if resources.BoolValue(inst.Spec.SelfConfigure.Enabled) {
+		eps, err := r.resolveAPIServerEndpoints(ctx)
+		switch {
+		case err != nil:
+			r.Recorder.Eventf(inst, corev1.EventTypeWarning, EventReasonAPIServerEgressUnresolved,
+				"selfConfigure is enabled but the API server endpoints could not be read (%v); "+
+					"add an egress rule for the API server via spec.security.networkPolicy.additionalEgress", err)
+		case len(eps) == 0:
+			r.Recorder.Event(inst, corev1.EventTypeWarning, EventReasonAPIServerEgressUnresolved,
+				"selfConfigure is enabled but the kubernetes/default EndpointSlice lists no ready addresses; "+
+					"add an egress rule for the API server via spec.security.networkPolicy.additionalEgress")
+		default:
+			apiServer = eps
+		}
+	}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, obj, func() error {
-		desired := resources.BuildNetworkPolicy(inst)
+		desired := resources.BuildNetworkPolicyWithAPIServer(inst, apiServer)
 		obj.Labels = resources.MergePreservingForeign(obj.Labels, desired.Labels, operatorLabelPrefix)
 		obj.Spec = desired.Spec
 		return controllerutil.SetControllerReference(inst, obj, r.Scheme)
 	})
 	return err
+}
+
+// EventReasonAPIServerEgressUnresolved is emitted when selfConfigure is on
+// but the operator could not derive an API server egress rule.
+const EventReasonAPIServerEgressUnresolved = "APIServerEgressUnresolved"
+
+// resolveAPIServerEndpoints reads the EndpointSlices behind the kubernetes
+// Service in the default namespace and returns every ready TCP address:port.
+// This is what kube-proxy DNATs kubernetes.default.svc to, so it is what a
+// NetworkPolicy has to allow. The cache for EndpointSlice is scoped to that
+// one Service in cmd/main.go.
+func (r *HermesInstanceReconciler) resolveAPIServerEndpoints(ctx context.Context) ([]resources.APIServerEndpoint, error) {
+	slices := &discoveryv1.EndpointSliceList{}
+	if err := r.List(ctx, slices,
+		client.InNamespace(metav1.NamespaceDefault),
+		client.MatchingLabels{discoveryv1.LabelServiceName: "kubernetes"},
+	); err != nil {
+		return nil, fmt.Errorf("list kubernetes EndpointSlices: %w", err)
+	}
+	var out []resources.APIServerEndpoint
+	for _, sl := range slices.Items {
+		for _, p := range sl.Ports {
+			if p.Port == nil || (p.Protocol != nil && *p.Protocol != corev1.ProtocolTCP) {
+				continue
+			}
+			for _, ep := range sl.Endpoints {
+				if ep.Conditions.Ready != nil && !*ep.Conditions.Ready {
+					continue
+				}
+				for _, addr := range ep.Addresses {
+					out = append(out, resources.APIServerEndpoint{IP: addr, Port: *p.Port})
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 func (r *HermesInstanceReconciler) reconcileRBAC(ctx context.Context, inst *hermesv1.HermesInstance) error {

@@ -27,12 +27,17 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	discoveryv1 "k8s.io/api/discovery/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -146,8 +151,23 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
+		Scheme:  scheme,
+		Metrics: metricsServerOptions,
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				// The instance reconciler reads the API server's endpoints to
+				// build a NetworkPolicy egress rule for self-configuring
+				// agents. Scope the informer to that one Service so the
+				// operator does not cache every EndpointSlice in the cluster.
+				&discoveryv1.EndpointSlice{}: {
+					Namespaces: map[string]cache.Config{
+						metav1.NamespaceDefault: {
+							LabelSelector: labels.SelectorFromSet(labels.Set{discoveryv1.LabelServiceName: "kubernetes"}),
+						},
+					},
+				},
+			},
+		},
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,

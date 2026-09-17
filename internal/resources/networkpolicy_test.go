@@ -241,3 +241,55 @@ func TestBuildNetworkPolicy_TailscaleEgress(t *testing.T) {
 		}
 	}
 }
+
+func apiServerEgressRules(np *networkingv1.NetworkPolicy) []networkingv1.NetworkPolicyEgressRule {
+	var out []networkingv1.NetworkPolicyEgressRule
+	for _, e := range np.Spec.Egress {
+		if len(e.To) > 0 && e.To[0].IPBlock != nil && len(e.Ports) == 1 {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func TestBuildNetworkPolicy_APIServerEgressWhenSelfConfigure(t *testing.T) {
+	t.Parallel()
+	inst := minimalInstance()
+	inst.Spec.SelfConfigure.Enabled = Ptr(true)
+	eps := []APIServerEndpoint{
+		{IP: "10.0.1.71", Port: 6443},
+		{IP: "10.0.1.70", Port: 6443},
+		{IP: "10.0.1.70", Port: 6443}, // duplicate collapses
+		{IP: "fd00::1", Port: 443},
+		{IP: "not-an-ip", Port: 6443}, // skipped
+		{IP: "10.0.1.72", Port: 0},    // skipped
+	}
+	np := BuildNetworkPolicyWithAPIServer(inst, eps)
+	rules := apiServerEgressRules(np)
+	if assert.Len(t, rules, 2, "one rule per distinct port, sorted") {
+		assert.Equal(t, 443, rules[0].Ports[0].Port.IntValue())
+		assert.Equal(t, corev1.ProtocolTCP, *rules[0].Ports[0].Protocol)
+		assert.Equal(t, "fd00::1/128", rules[0].To[0].IPBlock.CIDR)
+
+		assert.Equal(t, 6443, rules[1].Ports[0].Port.IntValue())
+		assert.Len(t, rules[1].To, 2)
+		assert.Equal(t, "10.0.1.70/32", rules[1].To[0].IPBlock.CIDR)
+		assert.Equal(t, "10.0.1.71/32", rules[1].To[1].IPBlock.CIDR)
+	}
+	// Deterministic across calls regardless of input order.
+	again := BuildNetworkPolicyWithAPIServer(inst, []APIServerEndpoint{eps[3], eps[0], eps[1]})
+	assert.Equal(t, np.Spec.Egress, again.Spec.Egress)
+}
+
+func TestBuildNetworkPolicy_NoAPIServerEgressWithoutSelfConfigure(t *testing.T) {
+	t.Parallel()
+	inst := minimalInstance()
+	eps := []APIServerEndpoint{{IP: "10.0.1.70", Port: 6443}}
+	assert.Empty(t, apiServerEgressRules(BuildNetworkPolicyWithAPIServer(inst, eps)),
+		"selfConfigure off: the agent has no business talking to the API server")
+
+	inst.Spec.SelfConfigure.Enabled = Ptr(true)
+	assert.Empty(t, apiServerEgressRules(BuildNetworkPolicyWithAPIServer(inst, nil)),
+		"no endpoints resolved: emit nothing rather than a bogus rule")
+	assert.Equal(t, BuildNetworkPolicy(inst).Spec, BuildNetworkPolicyWithAPIServer(inst, nil).Spec)
+}

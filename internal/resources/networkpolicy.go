@@ -1,6 +1,9 @@
 package resources
 
 import (
+	"net"
+	"sort"
+
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,8 +17,26 @@ func NetworkPolicyName(inst *hermesv1.HermesInstance) string {
 	return inst.Name
 }
 
+// APIServerEndpoint is one address and port the Kubernetes API server
+// listens on, as advertised by the kubernetes/default EndpointSlice.
+type APIServerEndpoint struct {
+	IP   string
+	Port int32
+}
+
 // BuildNetworkPolicy returns a default-deny baseline plus selective allow rules.
 func BuildNetworkPolicy(inst *hermesv1.HermesInstance) *networkingv1.NetworkPolicy {
+	return BuildNetworkPolicyWithAPIServer(inst, nil)
+}
+
+// BuildNetworkPolicyWithAPIServer is BuildNetworkPolicy plus, when
+// spec.selfConfigure.enabled is true and apiServer is non-empty, an egress
+// rule to the real API server addresses. The baseline only opens TCP/443;
+// kubernetes.default.svc is DNATed to the endpoint address and port before
+// the policy is evaluated, so a distribution whose API server listens on
+// another port (k3s on 6443, kubeadm on 6443, kind on a random port) drops
+// the connection without this rule.
+func BuildNetworkPolicyWithAPIServer(inst *hermesv1.HermesInstance, apiServer []APIServerEndpoint) *networkingv1.NetworkPolicy {
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      NetworkPolicyName(inst),
@@ -29,7 +50,7 @@ func BuildNetworkPolicy(inst *hermesv1.HermesInstance) *networkingv1.NetworkPoli
 				networkingv1.PolicyTypeEgress,
 			},
 			Ingress: buildIngressRules(inst),
-			Egress:  buildEgressRules(inst),
+			Egress:  buildEgressRules(inst, apiServer),
 		},
 	}
 }
@@ -98,7 +119,7 @@ func buildIngressRules(inst *hermesv1.HermesInstance) []networkingv1.NetworkPoli
 	return rules
 }
 
-func buildEgressRules(inst *hermesv1.HermesInstance) []networkingv1.NetworkPolicyEgressRule {
+func buildEgressRules(inst *hermesv1.HermesInstance, apiServer []APIServerEndpoint) []networkingv1.NetworkPolicyEgressRule {
 	rules := []networkingv1.NetworkPolicyEgressRule{}
 
 	allowDNS := BoolValueOrDefault(inst.Spec.Security.NetworkPolicy.AllowDNS, true)
@@ -130,7 +151,61 @@ func buildEgressRules(inst *hermesv1.HermesInstance) []networkingv1.NetworkPolic
 	rules = append(rules, ExtraEgressRules(inst)...)
 
 	rules = append(rules, buildTailscaleEgressRules(inst)...)
+
+	rules = append(rules, buildAPIServerEgressRules(inst, apiServer)...)
 	return rules
+}
+
+// buildAPIServerEgressRules returns one egress rule per distinct API server
+// port, each listing every endpoint address as a host CIDR. Only emitted when
+// self-configuration is on: that is the only operator feature that makes the
+// agent talk to the API server. Output is sorted so the rule set is stable
+// across reconciles.
+func buildAPIServerEgressRules(inst *hermesv1.HermesInstance, apiServer []APIServerEndpoint) []networkingv1.NetworkPolicyEgressRule {
+	if !BoolValue(inst.Spec.SelfConfigure.Enabled) || len(apiServer) == 0 {
+		return nil
+	}
+	byPort := map[int32]map[string]struct{}{}
+	for _, ep := range apiServer {
+		ip := net.ParseIP(ep.IP)
+		if ip == nil || ep.Port <= 0 {
+			continue
+		}
+		if byPort[ep.Port] == nil {
+			byPort[ep.Port] = map[string]struct{}{}
+		}
+		byPort[ep.Port][hostCIDR(ip)] = struct{}{}
+	}
+	ports := make([]int32, 0, len(byPort))
+	for p := range byPort {
+		ports = append(ports, p)
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+
+	rules := make([]networkingv1.NetworkPolicyEgressRule, 0, len(ports))
+	for _, p := range ports {
+		cidrs := make([]string, 0, len(byPort[p]))
+		for c := range byPort[p] {
+			cidrs = append(cidrs, c)
+		}
+		sort.Strings(cidrs)
+		to := make([]networkingv1.NetworkPolicyPeer, 0, len(cidrs))
+		for _, c := range cidrs {
+			to = append(to, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: c}})
+		}
+		rules = append(rules, networkingv1.NetworkPolicyEgressRule{
+			To:    to,
+			Ports: []networkingv1.NetworkPolicyPort{{Protocol: Ptr(corev1.ProtocolTCP), Port: Ptr(intstr.FromInt32(p))}},
+		})
+	}
+	return rules
+}
+
+func hostCIDR(ip net.IP) string {
+	if ip.To4() != nil {
+		return ip.String() + "/32"
+	}
+	return ip.String() + "/128"
 }
 
 func buildTailscaleEgressRules(inst *hermesv1.HermesInstance) []networkingv1.NetworkPolicyEgressRule {

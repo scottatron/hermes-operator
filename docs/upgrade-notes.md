@@ -49,6 +49,21 @@ state in memory as intended.
 pick up the new env var. If you replaced the built-in sidecar with a
 hand-rolled one in `spec.sidecars`, you can remove it.
 
+### Self-configuring agents get an egress rule to the API server
+
+**What changed.** With `spec.selfConfigure.enabled: true` the agent needs to
+reach the Kubernetes API, but the generated NetworkPolicy only opened TCP/443.
+On k3s, kubeadm and kind the API server endpoint is on another port, so the
+DNATed connection was dropped. The operator now reads the `kubernetes`
+EndpointSlice in `default` and appends `ipBlock` rules for its addresses and
+ports. This needs `get`, `list`, `watch` on `endpointslices` in
+`discovery.k8s.io`; the Helm chart and kustomize RBAC include it.
+
+**Action.** If you carry your own ClusterRole, add the `endpointslices` rule.
+If you added an API server rule through `additionalEgress` as a workaround,
+you can remove it after confirming the generated rule is present in
+`kubectl get networkpolicy <instance> -o yaml`.
+
 ## 0.2.0
 
 ### The agent container now has default resource requests and limits

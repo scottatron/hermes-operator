@@ -6,6 +6,7 @@
 
 - A `HermesInstance` with `spec.selfConfigure.enabled: true` and at least one entry in `spec.selfConfigure.allowedActions`.
 - The operator (Plan 4+) running in the cluster.
+- Egress from the agent pod to the API server. The operator's NetworkPolicy baseline only opens TCP/443, and `kubernetes.default.svc` is DNATed to the real endpoint before the policy is evaluated, so on distributions whose API server listens elsewhere (k3s and kubeadm on 6443, kind on a random port) the connection would be dropped. When `selfConfigure.enabled` is true the operator reads the `kubernetes` EndpointSlice in `default` and adds an `ipBlock` rule for each address and port. If it cannot (no RBAC for `endpointslices`, or the slice is empty) it emits a Warning event with reason `APIServerEgressUnresolved` on the instance; add the rule yourself through `spec.security.networkPolicy.additionalEgress`.
 
 ## Enabling self-configuration on an instance
 

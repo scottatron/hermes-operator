@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -35,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	hermesv1 "github.com/paperclipinc/hermes-operator/api/v1"
 	"github.com/paperclipinc/hermes-operator/internal/resources"
@@ -675,6 +677,59 @@ var _ = Describe("HermesInstance reconciler: config hash", func() {
 			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: instName + "-config", Namespace: ns}, &cm)).To(Succeed())
 			g.Expect(cm.Data["config.yaml"]).To(ContainSubstring("gpt-4o-mini"))
 			g.Expect(got).To(Equal(resources.HashConfigMapData(cm.Data)))
+		}, "30s", "250ms").Should(Succeed())
+	})
+})
+
+var _ = Describe("HermesInstance reconciler: API server egress", func() {
+	const (
+		instName = "apiegress-it"
+		ns       = "default"
+	)
+
+	AfterEach(func() {
+		ctx := context.Background()
+		_ = k8sClient.Delete(ctx, &hermesv1.HermesInstance{ObjectMeta: metav1.ObjectMeta{Name: instName, Namespace: ns}})
+		_ = k8sClient.Delete(ctx, &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: instName, Namespace: ns}})
+	})
+
+	It("adds an ipBlock egress rule to the API server endpoints when selfConfigure is enabled", func() {
+		ctx := context.Background()
+
+		// envtest's kube-apiserver publishes its own kubernetes/default
+		// EndpointSlice; read it so the expectation matches this run.
+		slices := &discoveryv1.EndpointSliceList{}
+		Expect(k8sClient.List(ctx, slices, client.InNamespace("default"),
+			client.MatchingLabels{discoveryv1.LabelServiceName: "kubernetes"})).To(Succeed())
+		Expect(slices.Items).NotTo(BeEmpty(), "envtest apiserver must publish the kubernetes EndpointSlice")
+		wantCIDR := slices.Items[0].Endpoints[0].Addresses[0] + "/32"
+		wantPort := *slices.Items[0].Ports[0].Port
+
+		inst := &hermesv1.HermesInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: instName, Namespace: ns},
+			Spec: hermesv1.HermesInstanceSpec{
+				Image:         hermesv1.ImageSpec{Repository: "ghcr.io/paperclipinc/hermes-agent", Tag: "v1.0.0"},
+				SelfConfigure: hermesv1.SelfConfigureSpec{Enabled: Ptr(true)},
+			},
+		}
+		Expect(k8sClient.Create(ctx, inst)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			var np networkingv1.NetworkPolicy
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: instName, Namespace: ns}, &np)).To(Succeed())
+			found := false
+			for _, e := range np.Spec.Egress {
+				for _, to := range e.To {
+					if to.IPBlock != nil && to.IPBlock.CIDR == wantCIDR {
+						for _, p := range e.Ports {
+							if p.Port != nil && p.Port.IntVal == wantPort {
+								found = true
+							}
+						}
+					}
+				}
+			}
+			g.Expect(found).To(BeTrue(), "egress rule to %s:%d", wantCIDR, wantPort)
 		}, "30s", "250ms").Should(Succeed())
 	})
 })

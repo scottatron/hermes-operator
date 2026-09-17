@@ -150,6 +150,8 @@ Controls per-instance NetworkPolicy creation (default-deny baseline + selective 
 | `spec.security.networkPolicy.allowedEgressCIDRs` | `[]string` (listType=set) | `[]` | CIDRs the agent may connect to in addition to operator-built defaults (DNS + port 443). |
 | `spec.security.networkPolicy.additionalEgress` | `[]networkingv1.NetworkPolicyEgressRule` | `[]` | User-supplied egress rules appended verbatim to the generated NetworkPolicy. |
 
+When `spec.selfConfigure.enabled` is true the operator also appends an egress rule to the API server, derived from the `kubernetes` EndpointSlice in the `default` namespace (one `ipBlock` per address, one rule per port). A Warning event `APIServerEgressUnresolved` is emitted if that lookup fails.
+
 #### spec.security.caBundle
 
 Optionally mounts a CA bundle into the agent container at `/etc/ssl/certs/hermes-ca-bundle.crt` and sets `SSL_CERT_FILE` in the agent environment. Exactly one of `configMapName` or `secretName` should be set.

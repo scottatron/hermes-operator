@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -287,6 +288,10 @@ func validateCommon(inst *hermesv1.HermesInstance) (admission.Warnings, error) {
 		}
 	}
 
+	if err := validateReservedNames(inst); err != nil {
+		return warns, err
+	}
+
 	pdb := inst.Spec.Availability.PodDisruptionBudget
 	if pdb.MinAvailable != nil && pdb.MaxUnavailable != nil {
 		return warns, fmt.Errorf("spec.availability.podDisruptionBudget: MinAvailable and MaxUnavailable are mutually exclusive")
@@ -395,3 +400,38 @@ func (v *HermesInstanceValidator) crossCheckSecrets(ctx context.Context, inst *h
 }
 
 var _ = webhook.Admission{}
+
+// Names the operator always places in the pod template. A user-supplied
+// sidecar or extraVolume with one of these names makes the StatefulSet
+// update fail apiserver validation ("Duplicate value"), which leaves the
+// StatefulSet frozen at its previous spec while the CR reports
+// StatefulSetReady=False. Reject at admission so the collision is visible
+// immediately instead of only in status and operator logs.
+var (
+	reservedContainerNames = []string{"hermes"}
+	reservedVolumeNames    = []string{"config", "data", "tmp", "workspace", "ca-bundle", "openclaw-source"}
+)
+
+func validateReservedNames(inst *hermesv1.HermesInstance) error {
+	for i, sc := range inst.Spec.Sidecars {
+		for _, r := range reservedContainerNames {
+			if sc.Name == r {
+				return fmt.Errorf(
+					"spec.sidecars[%d].name %q collides with the operator-managed container of the same name; rename the sidecar",
+					i, sc.Name,
+				)
+			}
+		}
+	}
+	for i, vol := range inst.Spec.ExtraVolumes {
+		for _, r := range reservedVolumeNames {
+			if vol.Name == r {
+				return fmt.Errorf(
+					"spec.extraVolumes[%d].name %q collides with an operator-managed volume of the same name (reserved: %s); rename the volume",
+					i, vol.Name, strings.Join(reservedVolumeNames, ", "),
+				)
+			}
+		}
+	}
+	return nil
+}

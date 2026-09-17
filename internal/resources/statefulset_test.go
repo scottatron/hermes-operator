@@ -602,3 +602,28 @@ func TestBuildStatefulSet_TailscaleSidecar(t *testing.T) {
 		assert.NotEqual(t, "tailscale-tmp", v.Name)
 	}
 }
+
+func TestBuildStatefulSet_SidecarSecurityContextPreserved(t *testing.T) {
+	t.Parallel()
+	inst := minimalInstance()
+	inst.Spec.Sidecars = []corev1.Container{{
+		Name:  "workspace",
+		Image: "example.com/workspace:1",
+		SecurityContext: &corev1.SecurityContext{
+			Privileged:               Ptr(false),
+			AllowPrivilegeEscalation: Ptr(true),
+			Capabilities:             &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}},
+		},
+	}}
+	sts := BuildStatefulSet(inst, nil)
+	var found *corev1.Container
+	for i := range sts.Spec.Template.Spec.Containers {
+		if sts.Spec.Template.Spec.Containers[i].Name == "workspace" {
+			found = &sts.Spec.Template.Spec.Containers[i]
+		}
+	}
+	require.NotNil(t, found, "sidecar container must be present")
+	require.NotNil(t, found.SecurityContext, "sidecar securityContext must be carried through")
+	assert.Equal(t, []corev1.Capability{"SYS_ADMIN"}, found.SecurityContext.Capabilities.Add)
+	assert.True(t, *found.SecurityContext.AllowPrivilegeEscalation)
+}

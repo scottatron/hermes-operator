@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -491,4 +492,49 @@ func TestValidateMigrationSourceExactlyOne(t *testing.T) {
 		},
 	}
 	assert.Empty(t, validateMigrationSourceExactlyOne(one))
+}
+
+func TestValidator_DenyReservedSidecarAndVolumeNames(t *testing.T) {
+	t.Parallel()
+	v := &HermesInstanceValidator{}
+	base := func() *hermesv1.HermesInstance {
+		return &hermesv1.HermesInstance{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "agents"},
+			Spec: hermesv1.HermesInstanceSpec{
+				Image:   hermesv1.ImageSpec{Repository: "ghcr.io/paperclipinc/hermes-agent", Tag: "v1"},
+				Storage: hermesv1.StorageSpec{Persistence: hermesv1.PersistenceSpec{Size: "1Gi"}},
+			},
+		}
+	}
+
+	// Sidecar named after the operator-managed agent container is denied.
+	inst := base()
+	inst.Spec.Sidecars = []corev1.Container{{Name: "hermes", Image: "busybox"}}
+	_, err := v.ValidateCreate(context.Background(), inst)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "spec.sidecars[0]")
+	assert.Contains(t, err.Error(), `"hermes"`)
+
+	// Each operator-managed volume name is denied when used in extraVolumes.
+	for _, name := range []string{"config", "data", "tmp", "workspace", "ca-bundle", "openclaw-source"} {
+		inst = base()
+		inst.Spec.ExtraVolumes = []corev1.Volume{{Name: name}}
+		_, err = v.ValidateCreate(context.Background(), inst)
+		require.Error(t, err, "extraVolume %q must be rejected", name)
+		assert.Contains(t, err.Error(), "spec.extraVolumes[0]")
+		assert.Contains(t, err.Error(), name)
+	}
+
+	// Non-colliding names are fine, and the same check runs on update.
+	inst = base()
+	inst.Spec.Sidecars = []corev1.Container{{Name: "workspace", Image: "busybox"}}
+	inst.Spec.ExtraVolumes = []corev1.Volume{{Name: "run"}, {Name: "run-lock"}}
+	_, err = v.ValidateCreate(context.Background(), inst)
+	require.NoError(t, err)
+
+	newI := base()
+	newI.Spec.ExtraVolumes = []corev1.Volume{{Name: "tmp"}}
+	_, err = v.ValidateUpdate(context.Background(), inst, newI)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "spec.extraVolumes[0]")
 }

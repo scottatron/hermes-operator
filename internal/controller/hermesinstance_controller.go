@@ -59,6 +59,12 @@ type HermesInstanceReconciler struct {
 	// CRDs are installed. Probed once at startup by cmd/manager.
 	PrometheusOperatorCRDsPresent bool
 
+	// APIReader is an uncached reader (mgr.GetAPIReader()) for the one-off
+	// lookups that must not start an informer: a cached List on a type the
+	// operator has no RBAC for blocks on cache sync forever instead of
+	// returning Forbidden. Falls back to Client when nil (tests).
+	APIReader client.Reader
+
 	Backup     *BackupReconciler
 	Restore    *RestoreReconciler
 	AutoUpdate *AutoUpdateReconciler
@@ -375,11 +381,18 @@ const EventReasonAPIServerEgressUnresolved = "APIServerEgressUnresolved"
 // resolveAPIServerEndpoints reads the EndpointSlices behind the kubernetes
 // Service in the default namespace and returns every ready TCP address:port.
 // This is what kube-proxy DNATs kubernetes.default.svc to, so it is what a
-// NetworkPolicy has to allow. The cache for EndpointSlice is scoped to that
-// one Service in cmd/main.go.
+// NetworkPolicy has to allow. The read is uncached on purpose: it runs only
+// for self-configuring instances, the data changes about never, and an
+// operator deployed with a ClusterRole that predates the endpointslices
+// rule must get a Forbidden error back (and emit the warning event), not
+// hang the reconcile worker on an informer that can never sync.
 func (r *HermesInstanceReconciler) resolveAPIServerEndpoints(ctx context.Context) ([]resources.APIServerEndpoint, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	slices := &discoveryv1.EndpointSliceList{}
-	if err := r.List(ctx, slices,
+	if err := reader.List(ctx, slices,
 		client.InNamespace(metav1.NamespaceDefault),
 		client.MatchingLabels{discoveryv1.LabelServiceName: "kubernetes"},
 	); err != nil {

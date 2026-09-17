@@ -123,6 +123,7 @@ var _ = BeforeSuite(func() {
 
 	err = (&HermesInstanceReconciler{
 		Client:                        k8sManager.GetClient(),
+		APIReader:                     k8sManager.GetAPIReader(),
 		Scheme:                        k8sManager.GetScheme(),
 		PrometheusOperatorCRDsPresent: false,
 		Recorder:                      k8sManager.GetEventRecorderFor("hermes-operator"),

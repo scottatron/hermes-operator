@@ -37,6 +37,18 @@ reconcile, so the patch survives reconciles and is retracted when the
 workspace ConfigMap, drop that dependency. The rendered ConfigMap is
 subPath-mounted, so restart the pod after a patch lands.
 
+### The tailscale sidecar no longer crashloops in-cluster
+
+**What changed.** containerboot defaults `TS_KUBE_SECRET` to `tailscale` when
+it runs inside a pod and then tries to read and patch that Secret. The operator
+grants no RBAC for it, so the sidecar exited on start. The sidecar now sets
+`TS_KUBE_SECRET` to an empty string, which disables the Secret store and keeps
+state in memory as intended.
+
+**Action.** None. Instances with `spec.tailscale.enabled=true` roll once to
+pick up the new env var. If you replaced the built-in sidecar with a
+hand-rolled one in `spec.sidecars`, you can remove it.
+
 ## 0.2.0
 
 ### The agent container now has default resource requests and limits

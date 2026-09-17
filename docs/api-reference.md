@@ -477,6 +477,8 @@ Exposes the hermes gateway over a Tailscale tailnet via an operator-managed side
 | `image.pullPolicy` | string | `IfNotPresent` | One of `Always`, `IfNotPresent`, `Never`. |
 | `resources` | ResourceRequirements | `{}` | Sidecar container resource requests/limits. |
 
+The sidecar keeps its state in memory (`TS_KUBE_SECRET` is set to an empty string so containerboot does not try to use a `tailscale` Secret it has no RBAC for), so the node re-registers on every pod restart. Use a reusable, ephemeral auth key.
+
 ### HermesInstance status
 
 | Field | Type | Description |

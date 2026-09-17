@@ -76,12 +76,18 @@ func BuildTailscaleSidecar(inst *hermesv1.HermesInstance) *corev1.Container {
 		pullPolicy = corev1.PullIfNotPresent
 	}
 
-	// No TS_KUBE_SECRET and no TS_STATE_DIR: containerboot then defaults to
-	// `--state=mem: --statedir=/tmp`, i.e. in-memory ephemeral state.
-	// Ephemerality itself comes from the auth key, which the user supplies as
-	// reusable + ephemeral.
+	// State is in-memory: containerboot falls back to `--state=mem:` when
+	// it has no Secret store and no TS_STATE_DIR. Inside a pod (it detects
+	// KUBERNETES_SERVICE_HOST) containerboot defaults TS_KUBE_SECRET to
+	// "tailscale" and then tries to read and patch that Secret, which fails
+	// without RBAC and a mounted SA token and crashloops the sidecar. An
+	// explicitly empty TS_KUBE_SECRET disables the Secret store (unset and
+	// empty are distinct; containerboot uses LookupEnv), so set it to "".
+	// Ephemerality itself comes from the auth key, which the user supplies
+	// as reusable + ephemeral.
 	env := []corev1.EnvVar{
 		{Name: "TS_USERSPACE", Value: "true"},
+		{Name: "TS_KUBE_SECRET", Value: ""},
 		{Name: "TS_HOSTNAME", Value: tailscaleHostname(inst)},
 		{Name: "TS_SERVE_CONFIG", Value: tailscaleServeMount + "/" + tailscaleServeFile},
 	}

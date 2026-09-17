@@ -62,6 +62,10 @@ func TestBuildTailscaleSidecar(t *testing.T) {
 	require.NotNil(t, userspace)
 	assert.Equal(t, "true", userspace.Value)
 
+	kubeSecret := envByName(c, "TS_KUBE_SECRET")
+	require.NotNil(t, kubeSecret, "TS_KUBE_SECRET must be present: in-cluster containerboot defaults it to \"tailscale\" and crashloops without RBAC")
+	assert.Equal(t, "", kubeSecret.Value, "explicitly empty TS_KUBE_SECRET disables the Secret state store")
+	assert.Nil(t, kubeSecret.ValueFrom)
 	assert.Nil(t, envByName(c, "TS_STATE_DIR"), "containerboot default --state=mem: must not be overridden")
 	assert.Nil(t, envByName(c, "TS_EXTRA_ARGS"), "containerboot default --state=mem: must not be overridden")
 
